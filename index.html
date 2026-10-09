@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Клеточный автомат</title>
+<title>Cellular Automaton</title>
 <style>
   html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
   canvas {
@@ -48,15 +48,15 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hint">Кликай и води мышкой по полю · пробел — пауза</div>
+<div id="hint">Click and drag on the field · space to pause</div>
 <div id="panel">
   <div class="row">
-    <input id="rule" spellcheck="false" autocomplete="off" aria-label="Правило">
-    <button id="pause">Пауза</button>
-    <button id="reseed">Заново</button>
-    <button id="clear">Очистить</button>
-    <select id="cell" title="Размер клетки"></select>
-    <button id="min" title="Свернуть панель">▾</button>
+    <input id="rule" spellcheck="false" autocomplete="off" aria-label="Rule">
+    <button id="pause">Pause</button>
+    <button id="reseed">Reseed</button>
+    <button id="clear">Clear</button>
+    <select id="cell" title="Cell size"></select>
+    <button id="min" title="Collapse panel">▾</button>
   </div>
   <div class="row" id="presets"></div>
   <div id="help"></div>
@@ -65,7 +65,7 @@
 <script id="vs" type="x-shader/x-vertex">#version 300 es
 out vec2 vUv;
 void main() {
-  // один треугольник на весь экран, без буферов
+  // a single full-screen triangle, no buffers
   vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
   vUv = p;
   gl_Position = vec4(p * 2. - 1., 0, 1);
@@ -75,10 +75,10 @@ void main() {
 <script id="simFs" type="x-shader/x-fragment">#version 300 es
 precision highp float;
 precision highp int;
-// R — состояние клетки, G — «тепло» для светящегося следа
+// R is the cell state, G is "heat" for the glowing trail
 uniform sampler2D uTex;
 uniform ivec2 uSize;
-uniform int uOp; // 0 шаг, 1 кисть, 2 случайное поле, 3 очистка
+uniform int uOp; // 0 step, 1 brush, 2 random field, 3 clear
 uniform int uCyclic, uBorn, uSurvive, uC, uR, uT, uMoore;
 uniform float uSeed, uDensity, uRad;
 uniform vec2 uA, uB;
@@ -105,7 +105,7 @@ void main() {
   if (uOp == 3) { o = vec4(0, 0, 0, 1); return; }
   if (uOp == 2) { o = randomCell(); return; }
   if (uOp == 1) {
-    // расстояние до отрезка uA–uB: мазок кисти
+    // distance to the segment uA–uB: a brush stroke
     vec2 pa = gl_FragCoord.xy - uA, ba = uB - uA;
     float d = length(pa - ba * clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0., 1.));
     o = d <= uRad ? randomCell() : me;
@@ -113,7 +113,7 @@ void main() {
   }
 
   int s = int(me.r * 255. + .5);
-  // циклический: считаем соседей со следующим по кругу состоянием; иначе — живых
+  // cyclic: count neighbours in the next state around the cycle; otherwise count live ones
   int want = uCyclic == 1 ? (s + 1) % uC : 1;
   int k = 0;
   for (int dy = -uR; dy <= uR; dy++) {
@@ -130,7 +130,7 @@ void main() {
   else if (s == 1) v = ((uSurvive >> k) & 1) == 1 ? 1 : (uC > 2 ? 2 : 0);
   else v = s + 1 >= uC ? 0 : s + 1;
 
-  // вычитаем константу, иначе из-за округления до 8 бит след никогда не погаснет
+  // subtract a constant, otherwise 8-bit rounding keeps the trail from ever fading out
   float heat = v == 1 ? 1. : max(min(me.g * .93, .78) - .003, 0.);
   o = vec4(float(v) / 255., heat, 0, 1);
 }
@@ -153,7 +153,7 @@ void main() {
   vec4 t = texture(uTex, vUv);
   vec3 col;
   if (uCyclic == 1) {
-    // палитра медленно вращается
+    // the palette rotates slowly
     col = hsl(fract(t.r * 255. / float(uC) + uTime), .85, .5);
   } else {
     float h = t.g;
@@ -166,24 +166,24 @@ void main() {
 
 <script>
 const PRESETS = [
-  ['Спирали', 'R1/T1/C14/NN'],
-  ['Жизнь', 'B3/S23'],
-  ['Мозг Брайана', 'B2/S/C3'],
-  ['Звёздные войны', 'B2/S345/C4'],
+  ['Spirals', 'R1/T1/C14/NN'],
+  ['Life', 'B3/S23'],
+  ["Brian's Brain", 'B2/S/C3'],
+  ['Star Wars', 'B2/S345/C4'],
   ['HighLife', 'B36/S23'],
-  ['День и ночь', 'B3678/S34678'],
-  ['Лабиринт', 'B3/S12345'],
-  ['Кораллы', 'B3/S45678'],
-  ['Отжиг', 'B4678/S35678'],
-  ['Лягушки', 'B34/S12/C3'],
-  ['Идеальные спирали', 'R1/T3/C4/NM'],
-  ['Турбулентность', 'R2/T5/C8/NM'],
-  ['Кубизм', 'R2/T5/C3/NN'],
-  ['Лава-лампа', 'R2/T10/C3/NM'],
+  ['Day & Night', 'B3678/S34678'],
+  ['Maze', 'B3/S12345'],
+  ['Coral', 'B3/S45678'],
+  ['Anneal', 'B4678/S35678'],
+  ['Frogs', 'B34/S12/C3'],
+  ['Perfect Spirals', 'R1/T3/C4/NM'],
+  ['Turbulence', 'R2/T5/C8/NM'],
+  ['Cubism', 'R2/T5/C3/NN'],
+  ['Lava Lamp', 'R2/T10/C3/NM'],
 ];
-const HELP = '<code>B3/S23/C2</code> — при скольких живых соседях клетка рождается (B) и выживает (S), '
-  + 'C — число состояний. Циклический: <code>R1/T1/C14/NN</code> — радиус, порог, число цветов, '
-  + 'окрестность (NM — 8 соседей, NN — ромб).';
+const HELP = '<code>B3/S23/C2</code> — live-neighbour counts at which a cell is born (B) and survives (S), '
+  + 'C is the number of states. Cyclic: <code>R1/T1/C14/NN</code> — range, threshold, number of colours, '
+  + 'neighbourhood (NM — square, NN — diamond).';
 const DENSITY = .2;
 const MAX_RANGE = 5;
 
@@ -193,7 +193,7 @@ const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
 
 let W, H, cell = 3, rule, paused = false;
 let tex = [], fbo = [], cur = 0;
-let strokes = []; // мазки кисти, накопленные с прошлого кадра
+let strokes = []; // brush strokes accumulated since the last frame
 
 function parseRule(str) {
   const r = {};
@@ -201,28 +201,28 @@ function parseRule(str) {
     if (!tok) continue;
     const k = tok[0] === 'G' ? 'C' : tok[0], v = tok.slice(1);
     if (k === 'B' || k === 'S') {
-      if (!/^[0-8]*$/.test(v)) throw `После ${k} — только цифры от 0 до 8`;
+      if (!/^[0-8]*$/.test(v)) throw `Only digits 0–8 are allowed after ${k}`;
       r[k] = [...v].reduce((m, d) => m | 1 << d, 0);
     } else if (k === 'C' || k === 'R' || k === 'T') {
-      if (!/^\d+$/.test(v)) throw `После ${k} нужно число`;
+      if (!/^\d+$/.test(v)) throw `${k} must be followed by a number`;
       r[k] = +v;
     } else if (k === 'N') {
-      if (v !== 'M' && v !== 'N') throw 'Окрестность — NM или NN';
+      if (v !== 'M' && v !== 'N') throw 'Neighbourhood must be NM or NN';
       r.N = v;
-    } else throw `Не понимаю «${tok}»`;
+    } else throw `Cannot parse "${tok}"`;
   }
   const cyclic = 'R' in r || 'T' in r || 'N' in r;
   const c = r.C ?? (cyclic ? 14 : 2);
-  if (c < 2 || c > 255) throw 'C — от 2 до 255';
+  if (c < 2 || c > 255) throw 'C must be between 2 and 255';
   if (cyclic) {
-    if ('B' in r || 'S' in r) throw 'B/S и R/T/N нельзя смешивать';
+    if ('B' in r || 'S' in r) throw 'B/S and R/T/N cannot be mixed';
     const range = r.R ?? 1;
-    if (range < 1 || range > MAX_RANGE) throw `R — от 1 до ${MAX_RANGE}`;
-    if (r.T === 0) throw 'T — от 1';
+    if (range < 1 || range > MAX_RANGE) throw `R must be between 1 and ${MAX_RANGE}`;
+    if (r.T === 0) throw 'T must be at least 1';
     return { cyclic, c, range, threshold: r.T ?? 1, moore: r.N !== 'N' };
   }
-  if (!('B' in r) && !('S' in r)) throw 'Нужно хотя бы B или S';
-  if (r.B & 1) throw 'B0 заставляет мигать всё поле — не поддерживается';
+  if (!('B' in r) && !('S' in r)) throw 'At least B or S is required';
+  if (r.B & 1) throw 'B0 makes the whole field flash — not supported';
   return { cyclic, c, born: r.B ?? 0, survive: r.S ?? 0 };
 }
 
@@ -283,7 +283,7 @@ function resize() {
   seed();
 }
 
-// один проход шейдера симуляции: читаем из tex[cur], пишем во второй буфер, меняем местами
+// one simulation shader pass: read from tex[cur], write to the other buffer, swap
 function pass(op, stroke) {
   const u = sim.loc;
   gl.useProgram(sim.p);
@@ -299,7 +299,7 @@ function pass(op, stroke) {
   gl.uniform1i(u.uT, rule.threshold ?? 1);
   gl.uniform1i(u.uMoore, +(rule.moore ?? true));
   gl.uniform1f(u.uSeed, Math.random());
-  // кисть сеет гуще, чем начальное заполнение
+  // the brush seeds more densely than the initial fill
   gl.uniform1f(u.uDensity, op === 1 ? .5 : DENSITY);
   if (stroke) {
     gl.uniform2f(u.uA, stroke.ax, stroke.ay);
@@ -339,7 +339,7 @@ function setRule(str, reseed) {
   help.classList.remove('err');
   help.innerHTML = HELP;
   parsed.hue = hueOf(normalize(str));
-  // при смене типа автомата старое поле бессмысленно, а в пределах типа — интересно понаблюдать
+  // the old field is meaningless across automaton types, but fun to watch morph within one
   const typeChanged = !rule || rule.cyclic !== parsed.cyclic;
   rule = parsed;
   if (tex.length && (reseed || typeChanged)) seed();
@@ -348,13 +348,13 @@ function setRule(str, reseed) {
 
 function togglePause() {
   paused = !paused;
-  $('pause').textContent = paused ? 'Пуск' : 'Пауза';
+  $('pause').textContent = paused ? 'Play' : 'Pause';
   $('pause').classList.toggle('on', paused);
 }
 
 function init() {
   if (!gl) {
-    help.textContent = 'Этот браузер не поддерживает WebGL 2.';
+    help.textContent = 'This browser does not support WebGL 2.';
     help.classList.add('err');
     return;
   }
@@ -393,7 +393,7 @@ function init() {
   });
 
   let down = false, lastX = 0, lastY = 0;
-  // текстура перевёрнута по вертикали относительно экрана
+  // the texture is vertically flipped relative to the screen
   const cellAt = e => [e.clientX / innerWidth * W, (1 - e.clientY / innerHeight) * H];
   canvas.addEventListener('pointerdown', e => {
     down = true;
@@ -416,7 +416,7 @@ function init() {
   function loop(time) {
     for (const s of strokes) pass(1, s);
     strokes = [];
-    // шаги привязаны ко времени, а не к частоте обновления экрана
+    // steps are tied to time, not the display refresh rate
     const interval = rule.cyclic ? 1000 / 60 : 1000 / 30;
     acc = Math.min(acc + time - prev, interval * 2);
     prev = time;
