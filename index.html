@@ -11,19 +11,33 @@
     image-rendering: pixelated; cursor: crosshair; touch-action: none;
   }
   #panel {
-    position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
-    display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;
-    max-width: calc(100vw - 32px); padding: 8px;
-    background: rgba(10, 12, 20, .6); backdrop-filter: blur(10px);
+    position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%);
+    box-sizing: border-box; width: min(780px, calc(100vw - 24px)); padding: 10px;
+    display: flex; flex-direction: column; gap: 8px;
+    background: rgba(10, 12, 20, .7); backdrop-filter: blur(10px);
     border: 1px solid rgba(255, 255, 255, .12); border-radius: 14px;
-    font: 13px/1 system-ui, -apple-system, sans-serif;
+    color: #dfe3f0; font: 13px/1.3 system-ui, -apple-system, sans-serif;
   }
-  button {
-    padding: 8px 12px; color: #dfe3f0; background: rgba(255, 255, 255, .06);
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #panel.min #presets, #panel.min #help { display: none; }
+  button, select, #rule {
+    padding: 7px 11px; color: inherit; background: rgba(255, 255, 255, .06);
     border: 1px solid transparent; border-radius: 9px; font: inherit; cursor: pointer;
   }
-  button:hover { background: rgba(255, 255, 255, .14); }
+  button:hover, select:hover { background: rgba(255, 255, 255, .14); }
   button.on { border-color: rgba(255, 255, 255, .5); background: rgba(255, 255, 255, .18); }
+  select option { color: #000; }
+  #rule {
+    flex: 1; min-width: 150px; cursor: text; outline: none;
+    font: 14px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em;
+    border-color: rgba(255, 255, 255, .2);
+  }
+  #rule:focus { border-color: rgba(255, 255, 255, .6); }
+  #rule.err { border-color: #ff5d6c; }
+  #presets button { padding: 5px 9px; font-size: 12px; }
+  #help { font-size: 12px; color: rgba(223, 227, 240, .6); }
+  #help.err { color: #ff8a95; }
+  #help code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #dfe3f0; }
   #hint {
     position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
     color: rgba(255, 255, 255, .75); font: 13px system-ui, -apple-system, sans-serif;
@@ -34,203 +48,389 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hint">Кликай и води мышкой по полю · 1–4 режимы · пробел — пауза</div>
-<div id="panel"></div>
-<script>
-const CELL = 4; // размер клетки в CSS-пикселях
+<div id="hint">Кликай и води мышкой по полю · пробел — пауза</div>
+<div id="panel">
+  <div class="row">
+    <input id="rule" spellcheck="false" autocomplete="off" aria-label="Правило">
+    <button id="pause">Пауза</button>
+    <button id="reseed">Заново</button>
+    <button id="clear">Очистить</button>
+    <select id="cell" title="Размер клетки"></select>
+    <button id="min" title="Свернуть панель">▾</button>
+  </div>
+  <div class="row" id="presets"></div>
+  <div id="help"></div>
+</div>
 
-// gen — правила семейства Generations: born/survive по числу живых соседей,
-// c — число состояний (2 = обычная «Жизнь», больше — клетка «умирает» несколько шагов)
-const MODES = [
-  { name: 'Спирали', type: 'cyclic', n: 14 },
-  { name: 'Жизнь', type: 'gen', born: [3], survive: [2, 3], c: 2, density: .25, hue: 190 },
-  { name: 'Мозг Брайана', type: 'gen', born: [2], survive: [], c: 3, density: .08, hue: 280 },
-  { name: 'Звёздные войны', type: 'gen', born: [2], survive: [3, 4, 5], c: 4, density: .3, hue: 20 },
-];
+<script id="vs" type="x-shader/x-vertex">#version 300 es
+out vec2 vUv;
+void main() {
+  // один треугольник на весь экран, без буферов
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  vUv = p;
+  gl_Position = vec4(p * 2. - 1., 0, 1);
+}
+</script>
 
-const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-const panel = document.getElementById('panel');
-const hint = document.getElementById('hint');
+<script id="simFs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+precision highp int;
+// R — состояние клетки, G — «тепло» для светящегося следа
+uniform sampler2D uTex;
+uniform ivec2 uSize;
+uniform int uOp; // 0 шаг, 1 кисть, 2 случайное поле, 3 очистка
+uniform int uCyclic, uBorn, uSurvive, uC, uR, uT, uMoore;
+uniform float uSeed, uDensity, uRad;
+uniform vec2 uA, uB;
+out vec4 o;
 
-let W, H, cur, next, heat, img, px;
-let mode = MODES[0], paused = false, frame = 0;
-const lut = new Uint32Array(256);
-const bornT = new Uint8Array(9), surviveT = new Uint8Array(9);
-
-function hsl(h, s, l) {
-  h = ((h % 360) + 360) % 360;
-  const k = n => (n + h / 30) % 12;
-  const a = s * Math.min(l, 1 - l);
-  const f = n => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1))));
-  return (255 << 24) | (f(4) << 16) | (f(8) << 8) | f(0); // ABGR для little-endian
+float rnd(vec2 p) {
+  vec3 q = fract(vec3(p.xyx + uSeed * 1000.) * .1031);
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
 }
 
-function buildLut() {
-  if (mode.type === 'cyclic') {
-    for (let i = 0; i < mode.n; i++) lut[i] = hsl(i / mode.n * 360 + frame * .4, .85, .5);
-  } else {
-    for (let i = 0; i < 256; i++) {
-      const t = i / 255;
-      lut[i] = hsl(mode.hue + 70 * t, .9, .03 + .55 * t * t);
+vec4 randomCell() {
+  float r = rnd(gl_FragCoord.xy);
+  int v = uCyclic == 1 ? int(r * float(uC)) : int(r < uDensity);
+  return vec4(float(v) / 255., 0, 0, 1);
+}
+
+int state(ivec2 d) {
+  return int(texelFetch(uTex, (ivec2(gl_FragCoord.xy) + d + uSize) % uSize, 0).r * 255. + .5);
+}
+
+void main() {
+  vec4 me = texelFetch(uTex, ivec2(gl_FragCoord.xy), 0);
+  if (uOp == 3) { o = vec4(0, 0, 0, 1); return; }
+  if (uOp == 2) { o = randomCell(); return; }
+  if (uOp == 1) {
+    // расстояние до отрезка uA–uB: мазок кисти
+    vec2 pa = gl_FragCoord.xy - uA, ba = uB - uA;
+    float d = length(pa - ba * clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0., 1.));
+    o = d <= uRad ? randomCell() : me;
+    return;
+  }
+
+  int s = int(me.r * 255. + .5);
+  // циклический: считаем соседей со следующим по кругу состоянием; иначе — живых
+  int want = uCyclic == 1 ? (s + 1) % uC : 1;
+  int k = 0;
+  for (int dy = -uR; dy <= uR; dy++) {
+    for (int dx = -uR; dx <= uR; dx++) {
+      if (dx == 0 && dy == 0) continue;
+      if (uMoore == 0 && abs(dx) + abs(dy) > uR) continue;
+      if (state(ivec2(dx, dy)) == want) k++;
     }
-    lut[255] = hsl(mode.hue + 70, 1, .88);
   }
+
+  int v;
+  if (uCyclic == 1) v = k >= uT ? want : s;
+  else if (s == 0) v = (uBorn >> k) & 1;
+  else if (s == 1) v = ((uSurvive >> k) & 1) == 1 ? 1 : (uC > 2 ? 2 : 0);
+  else v = s + 1 >= uC ? 0 : s + 1;
+
+  // вычитаем константу, иначе из-за округления до 8 бит след никогда не погаснет
+  float heat = v == 1 ? 1. : max(min(me.g * .93, .78) - .003, 0.);
+  o = vec4(float(v) / 255., heat, 0, 1);
+}
+</script>
+
+<script id="drawFs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+uniform sampler2D uTex;
+uniform int uCyclic, uC;
+uniform float uHue, uTime;
+in vec2 vUv;
+out vec4 o;
+
+vec3 hsl(float h, float s, float l) {
+  vec3 k = mod(vec3(0, 8, 4) + h * 12., 12.);
+  return l - s * min(l, 1. - l) * clamp(min(k - 3., 9. - k), -1., 1.);
 }
 
-function seed() {
-  const cyc = mode.type === 'cyclic';
-  for (let i = 0; i < cur.length; i++) {
-    cur[i] = cyc ? Math.random() * mode.n : Math.random() < mode.density;
-    heat[i] = 0;
+void main() {
+  vec4 t = texture(uTex, vUv);
+  vec3 col;
+  if (uCyclic == 1) {
+    // палитра медленно вращается
+    col = hsl(fract(t.r * 255. / float(uC) + uTime), .85, .5);
+  } else {
+    float h = t.g;
+    col = h > .99 ? hsl(fract(uHue + .19), 1., .88)
+                  : hsl(fract(uHue + .19 * h), .9, .03 + .55 * h * h);
   }
+  o = vec4(col, 1);
+}
+</script>
+
+<script>
+const PRESETS = [
+  ['Спирали', 'R1/T1/C14/NN'],
+  ['Жизнь', 'B3/S23'],
+  ['Мозг Брайана', 'B2/S/C3'],
+  ['Звёздные войны', 'B2/S345/C4'],
+  ['HighLife', 'B36/S23'],
+  ['День и ночь', 'B3678/S34678'],
+  ['Лабиринт', 'B3/S12345'],
+  ['Кораллы', 'B3/S45678'],
+  ['Отжиг', 'B4678/S35678'],
+  ['Лягушки', 'B34/S12/C3'],
+  ['Идеальные спирали', 'R1/T3/C4/NM'],
+  ['Турбулентность', 'R2/T5/C8/NM'],
+  ['Кубизм', 'R2/T5/C3/NN'],
+  ['Лава-лампа', 'R2/T10/C3/NM'],
+];
+const HELP = '<code>B3/S23/C2</code> — при скольких живых соседях клетка рождается (B) и выживает (S), '
+  + 'C — число состояний. Циклический: <code>R1/T1/C14/NN</code> — радиус, порог, число цветов, '
+  + 'окрестность (NM — 8 соседей, NN — ромб).';
+const DENSITY = .2;
+const MAX_RANGE = 5;
+
+const $ = id => document.getElementById(id);
+const canvas = $('c'), panel = $('panel'), ruleInput = $('rule'), help = $('help'), hint = $('hint');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false });
+
+let W, H, cell = 3, rule, paused = false;
+let tex = [], fbo = [], cur = 0;
+let strokes = []; // мазки кисти, накопленные с прошлого кадра
+
+function parseRule(str) {
+  const r = {};
+  for (const tok of str.toUpperCase().replace(/\s/g, '').split('/')) {
+    if (!tok) continue;
+    const k = tok[0] === 'G' ? 'C' : tok[0], v = tok.slice(1);
+    if (k === 'B' || k === 'S') {
+      if (!/^[0-8]*$/.test(v)) throw `После ${k} — только цифры от 0 до 8`;
+      r[k] = [...v].reduce((m, d) => m | 1 << d, 0);
+    } else if (k === 'C' || k === 'R' || k === 'T') {
+      if (!/^\d+$/.test(v)) throw `После ${k} нужно число`;
+      r[k] = +v;
+    } else if (k === 'N') {
+      if (v !== 'M' && v !== 'N') throw 'Окрестность — NM или NN';
+      r.N = v;
+    } else throw `Не понимаю «${tok}»`;
+  }
+  const cyclic = 'R' in r || 'T' in r || 'N' in r;
+  const c = r.C ?? (cyclic ? 14 : 2);
+  if (c < 2 || c > 255) throw 'C — от 2 до 255';
+  if (cyclic) {
+    if ('B' in r || 'S' in r) throw 'B/S и R/T/N нельзя смешивать';
+    const range = r.R ?? 1;
+    if (range < 1 || range > MAX_RANGE) throw `R — от 1 до ${MAX_RANGE}`;
+    if (r.T === 0) throw 'T — от 1';
+    return { cyclic, c, range, threshold: r.T ?? 1, moore: r.N !== 'N' };
+  }
+  if (!('B' in r) && !('S' in r)) throw 'Нужно хотя бы B или S';
+  if (r.B & 1) throw 'B0 заставляет мигать всё поле — не поддерживается';
+  return { cyclic, c, born: r.B ?? 0, survive: r.S ?? 0 };
 }
 
-function clearField() {
-  cur.fill(0);
-  heat.fill(0);
+const normalize = s => s.toUpperCase().replace(/\s/g, '');
+
+function hueOf(str) {
+  let h = 0;
+  for (const ch of str) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % 360 / 360;
 }
+
+function compile(type, id) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, $(id).textContent);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+function program(fsId) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, 'vs'));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsId));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const loc = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const name = gl.getActiveUniform(p, i).name;
+    loc[name] = gl.getUniformLocation(p, name);
+  }
+  return { p, loc };
+}
+
+let sim, view;
 
 function resize() {
-  W = Math.ceil(innerWidth / CELL);
-  H = Math.ceil(innerHeight / CELL);
+  W = Math.ceil(innerWidth / cell);
+  H = Math.ceil(innerHeight / cell);
   canvas.width = W;
   canvas.height = H;
-  cur = new Uint8Array(W * H);
-  next = new Uint8Array(W * H);
-  heat = new Uint8Array(W * H);
-  img = ctx.createImageData(W, H);
-  px = new Uint32Array(img.data.buffer);
+  for (let i = 0; i < 2; i++) {
+    gl.deleteTexture(tex[i]);
+    gl.deleteFramebuffer(fbo[i]);
+    tex[i] = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex[i]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    fbo[i] = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[i]);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex[i], 0);
+  }
+  gl.viewport(0, 0, W, H);
+  strokes = [];
   seed();
 }
 
-function setMode(i) {
-  mode = MODES[i];
-  if (mode.type === 'gen') {
-    bornT.fill(0); surviveT.fill(0);
-    for (const n of mode.born) bornT[n] = 1;
-    for (const n of mode.survive) surviveT[n] = 1;
+// один проход шейдера симуляции: читаем из tex[cur], пишем во второй буфер, меняем местами
+function pass(op, stroke) {
+  const u = sim.loc;
+  gl.useProgram(sim.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo[1 - cur]);
+  gl.bindTexture(gl.TEXTURE_2D, tex[cur]);
+  gl.uniform2i(u.uSize, W, H);
+  gl.uniform1i(u.uOp, op);
+  gl.uniform1i(u.uCyclic, +rule.cyclic);
+  gl.uniform1i(u.uC, rule.c);
+  gl.uniform1i(u.uBorn, rule.born ?? 0);
+  gl.uniform1i(u.uSurvive, rule.survive ?? 0);
+  gl.uniform1i(u.uR, rule.range ?? 1);
+  gl.uniform1i(u.uT, rule.threshold ?? 1);
+  gl.uniform1i(u.uMoore, +(rule.moore ?? true));
+  gl.uniform1f(u.uSeed, Math.random());
+  // кисть сеет гуще, чем начальное заполнение
+  gl.uniform1f(u.uDensity, op === 1 ? .5 : DENSITY);
+  if (stroke) {
+    gl.uniform2f(u.uA, stroke.ax, stroke.ay);
+    gl.uniform2f(u.uB, stroke.bx, stroke.by);
+    gl.uniform1f(u.uRad, stroke.rad);
   }
-  buildLut();
-  seed();
-  [...panel.querySelectorAll('[data-mode]')].forEach((b, j) => b.classList.toggle('on', i === j));
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  cur = 1 - cur;
 }
 
-function step() {
-  const cyc = mode.type === 'cyclic', n = mode.n, c = mode.c;
-  for (let y = 0; y < H; y++) {
-    const r = y * W, ru = (y ? y - 1 : H - 1) * W, rd = (y + 1 === H ? 0 : y + 1) * W;
-    for (let x = 0; x < W; x++) {
-      const xl = x ? x - 1 : W - 1, xr = x + 1 === W ? 0 : x + 1;
-      const s = cur[r + x];
-      if (cyc) {
-        // клетку «съедает» сосед со следующим по кругу состоянием
-        const t = s + 1 === n ? 0 : s + 1;
-        next[r + x] = (cur[ru + x] === t || cur[rd + x] === t || cur[r + xl] === t || cur[r + xr] === t) ? t : s;
-      } else {
-        const k = (cur[ru + xl] === 1) + (cur[ru + x] === 1) + (cur[ru + xr] === 1)
-                + (cur[r + xl] === 1) + (cur[r + xr] === 1)
-                + (cur[rd + xl] === 1) + (cur[rd + x] === 1) + (cur[rd + xr] === 1);
-        let v;
-        if (s === 0) v = bornT[k];
-        else if (s === 1) v = surviveT[k] ? 1 : (c > 2 ? 2 : 0);
-        else v = s + 1 === c ? 0 : s + 1;
-        next[r + x] = v;
-      }
-    }
-  }
-  [cur, next] = [next, cur];
+const seed = () => pass(2);
+const clearField = () => pass(3);
+
+function draw(time) {
+  const u = view.loc;
+  gl.useProgram(view.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.bindTexture(gl.TEXTURE_2D, tex[cur]);
+  gl.uniform1i(u.uCyclic, +rule.cyclic);
+  gl.uniform1i(u.uC, rule.c);
+  gl.uniform1f(u.uHue, rule.hue);
+  gl.uniform1f(u.uTime, time / 15000);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
-function draw() {
-  if (mode.type === 'cyclic') {
-    buildLut(); // палитра медленно вращается
-    for (let i = 0; i < px.length; i++) px[i] = lut[cur[i]];
-  } else {
-    for (let i = 0; i < px.length; i++) {
-      const h = cur[i] === 1 ? 255 : Math.min(heat[i] * .93 | 0, 200);
-      heat[i] = h;
-      px[i] = lut[h];
-    }
+function setRule(str, reseed) {
+  let parsed;
+  try {
+    parsed = parseRule(str);
+  } catch (e) {
+    ruleInput.classList.add('err');
+    help.classList.add('err');
+    help.textContent = e;
+    return;
   }
-  ctx.putImageData(img, 0, 0);
+  ruleInput.classList.remove('err');
+  help.classList.remove('err');
+  help.innerHTML = HELP;
+  parsed.hue = hueOf(normalize(str));
+  // при смене типа автомата старое поле бессмысленно, а в пределах типа — интересно понаблюдать
+  const typeChanged = !rule || rule.cyclic !== parsed.cyclic;
+  rule = parsed;
+  if (tex.length && (reseed || typeChanged)) seed();
+  for (const b of $('presets').children) b.classList.toggle('on', b.dataset.rule === normalize(str));
 }
-
-// «взрыв» случайных клеток в круге радиуса rad
-function burst(cx, cy, rad) {
-  const cyc = mode.type === 'cyclic';
-  for (let dy = -rad; dy <= rad; dy++) {
-    for (let dx = -rad; dx <= rad; dx++) {
-      if (dx * dx + dy * dy > rad * rad) continue;
-      const i = ((cy + dy + H) % H) * W + (cx + dx + W) % W;
-      cur[i] = cyc ? Math.random() * mode.n : Math.random() < .5;
-    }
-  }
-}
-
-let down = false, lastX = 0, lastY = 0;
-const cellAt = e => [Math.floor(e.clientX / CELL), Math.floor(e.clientY / CELL)];
-
-canvas.addEventListener('pointerdown', e => {
-  down = true;
-  canvas.setPointerCapture(e.pointerId);
-  [lastX, lastY] = cellAt(e);
-  burst(lastX, lastY, 14);
-  hint.style.opacity = 0;
-});
-canvas.addEventListener('pointermove', e => {
-  if (!down) return;
-  const [x, y] = cellAt(e);
-  // интерполируем, чтобы при быстром движении не было разрывов
-  const steps = Math.max(Math.abs(x - lastX), Math.abs(y - lastY), 1);
-  for (let i = 1; i <= steps; i += 2) {
-    burst(Math.round(lastX + (x - lastX) * i / steps), Math.round(lastY + (y - lastY) * i / steps), 4);
-  }
-  lastX = x; lastY = y;
-});
-addEventListener('pointerup', () => down = false);
-addEventListener('pointercancel', () => down = false);
-
-function addButton(label, onClick, modeIndex) {
-  const b = document.createElement('button');
-  b.textContent = label;
-  if (modeIndex !== undefined) b.dataset.mode = modeIndex;
-  b.addEventListener('click', () => onClick(b));
-  panel.appendChild(b);
-  return b;
-}
-
-MODES.forEach((m, i) => addButton(m.name, () => setMode(i), i));
-const pauseBtn = addButton('Пауза', togglePause);
-addButton('Заново', seed);
-addButton('Очистить', clearField);
 
 function togglePause() {
   paused = !paused;
-  pauseBtn.textContent = paused ? 'Пуск' : 'Пауза';
-  pauseBtn.classList.toggle('on', paused);
+  $('pause').textContent = paused ? 'Пуск' : 'Пауза';
+  $('pause').classList.toggle('on', paused);
 }
 
-addEventListener('keydown', e => {
-  if (e.code === 'Space') { e.preventDefault(); togglePause(); }
-  else if (e.key >= '1' && e.key <= String(MODES.length)) setMode(+e.key - 1);
-  else if (e.code === 'KeyR') seed();
-  else if (e.code === 'KeyC') clearField();
-});
+function init() {
+  if (!gl) {
+    help.textContent = 'Этот браузер не поддерживает WebGL 2.';
+    help.classList.add('err');
+    return;
+  }
+  sim = program('simFs');
+  view = program('drawFs');
 
-addEventListener('resize', resize);
+  for (const [name, r] of PRESETS) {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.title = r;
+    b.dataset.rule = r;
+    b.addEventListener('click', () => { ruleInput.value = r; setRule(r, true); });
+    $('presets').appendChild(b);
+  }
+  for (const n of [1, 2, 3, 4, 6, 8]) $('cell').add(new Option(`${n} px`, n, false, n === cell));
 
-function loop() {
-  frame++;
-  // «Спирали» идут каждый кадр, остальные — через кадр, иначе слишком быстро
-  if (!paused && (mode.type === 'cyclic' || frame % 2 === 0)) step();
-  draw();
+  ruleInput.value = PRESETS[0][1];
+  setRule(ruleInput.value);
+  resize();
+
+  ruleInput.addEventListener('input', () => setRule(ruleInput.value));
+  $('pause').addEventListener('click', togglePause);
+  $('reseed').addEventListener('click', seed);
+  $('clear').addEventListener('click', clearField);
+  $('cell').addEventListener('change', e => { cell = +e.target.value; resize(); });
+  $('min').addEventListener('click', () => {
+    $('min').textContent = panel.classList.toggle('min') ? '▴' : '▾';
+  });
+  addEventListener('resize', resize);
+
+  addEventListener('keydown', e => {
+    if (e.target === ruleInput) return;
+    if (e.code === 'Space') { e.preventDefault(); togglePause(); }
+    else if (e.code === 'KeyR') seed();
+    else if (e.code === 'KeyC') clearField();
+  });
+
+  let down = false, lastX = 0, lastY = 0;
+  // текстура перевёрнута по вертикали относительно экрана
+  const cellAt = e => [e.clientX / innerWidth * W, (1 - e.clientY / innerHeight) * H];
+  canvas.addEventListener('pointerdown', e => {
+    down = true;
+    canvas.setPointerCapture(e.pointerId);
+    ruleInput.blur();
+    [lastX, lastY] = cellAt(e);
+    strokes.push({ ax: lastX, ay: lastY, bx: lastX, by: lastY, rad: Math.max(56 / cell, 2) });
+    hint.style.opacity = 0;
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!down) return;
+    const [x, y] = cellAt(e);
+    strokes.push({ ax: lastX, ay: lastY, bx: x, by: y, rad: Math.max(16 / cell, 1.5) });
+    lastX = x; lastY = y;
+  });
+  addEventListener('pointerup', () => down = false);
+  addEventListener('pointercancel', () => down = false);
+
+  let prev = 0, acc = 0;
+  function loop(time) {
+    for (const s of strokes) pass(1, s);
+    strokes = [];
+    // шаги привязаны ко времени, а не к частоте обновления экрана
+    const interval = rule.cyclic ? 1000 / 60 : 1000 / 30;
+    acc = Math.min(acc + time - prev, interval * 2);
+    prev = time;
+    if (acc >= interval) {
+      acc -= interval;
+      if (!paused) pass(0);
+    }
+    draw(time);
+    requestAnimationFrame(loop);
+  }
   requestAnimationFrame(loop);
 }
 
-resize();
-setMode(0);
-loop();
+init();
 </script>
 </body>
 </html>
